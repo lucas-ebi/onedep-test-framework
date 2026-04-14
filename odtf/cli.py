@@ -570,7 +570,7 @@ async def create_dep_task(api: DepositApi, test_entry: TestEntry, task: Task, co
                 country=Country(config.api.get("country")), 
                 etype=exp_type, 
                 subtype=exp_subtype, 
-                email="wbueno@ebi.ac.uk"
+                email="lucas@ebi.ac.uk"
             )
             test_entry.copy_dep_id = copy_dep.dep_id
             status_manager.track_task_result(test_entry, TaskType.CREATE, True)
