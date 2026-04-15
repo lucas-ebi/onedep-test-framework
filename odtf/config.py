@@ -16,17 +16,20 @@ def parse_task(task_data: Union[str, Dict]) -> Task:
             return CreateTask()
     elif isinstance(task_data, dict):
         if "compare_files" in task_data:
+            cf_data = task_data["compare_files"] or {}
             return CompareFilesTask(
-                source=task_data.get("source"),
-                rules=task_data.get("rules", [])
+                source=cf_data.get("source") if isinstance(cf_data, dict) else None,
+                rules=cf_data.get("rules", []) if isinstance(cf_data, dict) else []
             )
         elif "upload" in task_data:
+            upload_data = task_data["upload"] or {}
             return UploadTask(
-                files=task_data.get("files")
+                files=upload_data.get("files") if isinstance(upload_data, dict) else None
             )
         elif "compare_repos" in task_data:
+            cr_data = task_data["compare_repos"] or {}
             return CompareReposTask(
-                source=task_data.get("source"),
+                source=cr_data.get("source") if isinstance(cr_data, dict) else None,
             )
     raise ValueError(f"Unknown task type: {task_data}")
 
