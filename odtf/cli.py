@@ -575,6 +575,16 @@ async def create_dep_task(api: DepositApi, test_entry: TestEntry, task: Task, co
                 email="lucas@ebi.ac.uk"
             )
             test_entry.copy_dep_id = copy_dep.dep_id
+
+            # Workaround: server-side updateDepositorTable wipes the depositor
+            # link that _add_users() creates during build(). Re-add it here.
+            from wwpdb.apps.deposit.main.models import Depositor, DepositionDjango
+            orcid = config.api.get("orcid")
+            depositor, _ = Depositor.objects.get_or_create(orcid=orcid)
+            dep_obj = DepositionDjango.objects.get(username=copy_dep.dep_id)
+            dep_obj.depositor_set.add(depositor)
+            logging.info(f"Re-linked depositor {orcid} to {copy_dep.dep_id}")
+
             status_manager.track_task_result(test_entry, TaskType.CREATE, True)
         except Exception as e:
             status_manager.track_task_result(test_entry, TaskType.CREATE, False, str(e))
