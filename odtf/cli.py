@@ -185,7 +185,7 @@ async def create_deposition(api: DepositApi, orcid: str, country: Country, etype
         raise ValueError(f"Unknown experiment type: {etype}")
 
 
-async def monitor_processing(test_entry: TestEntry, config: Config, status_manager: StatusManager, timeout_minutes=30):
+async def monitor_processing(test_entry: TestEntry, config: Config, status_manager: StatusManager, timeout_minutes=120):
     """Monitor processing using the async API"""
     start_time = time.time()
     status = "started"
@@ -256,7 +256,7 @@ async def unlock_deposition(dep_id: str, config: Config):
     """Unlock a deposition by sending a POST request to the unlock endpoint."""
     orcid_cookie = get_cookie_signer(salt=settings.AUTH_COOKIE_KEY).sign(config.api.get("orcid"))
 
-    timeout = aiohttp.ClientTimeout(total=1800)
+    timeout = aiohttp.ClientTimeout(total=3600, sock_read=1800)
     connector = aiohttp.TCPConnector(
         limit=100,
         limit_per_host=10,
@@ -396,7 +396,7 @@ async def submit_task(test_entry: TestEntry, config: Config, status_manager: Sta
     orcid_cookie = get_cookie_signer(salt=settings.AUTH_COOKIE_KEY).sign(config.api.get("orcid"))
     base_url = config.api.get("base_url")
     
-    timeout = aiohttp.ClientTimeout(total=1800)
+    timeout = aiohttp.ClientTimeout(total=3600, sock_read=1800)
     connector = aiohttp.TCPConnector(
         limit=100,
         limit_per_host=10,
