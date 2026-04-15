@@ -154,8 +154,12 @@ class AsyncRestAdapter:
                 log_line = log_line_post.format(is_success, response.status, response.reason)
                 
                 if not is_success:
-                    self._logger.error(msg=log_line)
-                    raise DepositApiException(response.reason, response.status)
+                    try:
+                        error_body = await response.text()
+                    except Exception:
+                        error_body = "<could not read response body>"
+                    self._logger.error(msg=f"{log_line} body={error_body}")
+                    raise DepositApiException(f"{response.reason}: {error_body}", response.status)
                 
                 try:
                     data_out = await response.json()
