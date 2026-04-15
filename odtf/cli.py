@@ -578,12 +578,19 @@ async def create_dep_task(api: DepositApi, test_entry: TestEntry, task: Task, co
 
             # Workaround: server-side updateDepositorTable wipes the depositor
             # link that _add_users() creates during build(). Re-add it here.
+            # Must use sync_to_async since we're in an async context.
+            from asgiref.sync import sync_to_async
             from wwpdb.apps.deposit.main.models import Depositor, DepositionDjango
             orcid = config.api.get("orcid")
-            depositor, _ = Depositor.objects.get_or_create(orcid=orcid)
-            dep_obj = DepositionDjango.objects.get(username=copy_dep.dep_id)
-            dep_obj.depositor_set.add(depositor)
-            logging.info(f"Re-linked depositor {orcid} to {copy_dep.dep_id}")
+
+            @sync_to_async
+            def _relink_depositor():
+                depositor, _ = Depositor.objects.get_or_create(orcid=orcid)
+                dep_obj = DepositionDjango.objects.get(username=copy_dep.dep_id)
+                dep_obj.depositor_set.add(depositor)
+                logging.info(f"Re-linked depositor {orcid} to {copy_dep.dep_id}")
+
+            await _relink_depositor()
 
             status_manager.track_task_result(test_entry, TaskType.CREATE, True)
         except Exception as e:
