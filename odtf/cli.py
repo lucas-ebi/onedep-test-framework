@@ -357,7 +357,7 @@ async def _upload_all_files(api: DepositApi, test_entry: TestEntry, task: Upload
     return uploaded_files
 
 
-async def submit_task(test_entry: TestEntry, config: Config, status_manager: StatusManager):
+async def submit_task(test_entry: TestEntry, config: Config, status_manager: StatusManager, api_key: str = None):
     """Submit a deposition for processing"""
     test_pickles_location = pi.getDirPath(dataSetId=test_entry.dep_id, fileSource="pickles")
 
@@ -412,9 +412,11 @@ async def submit_task(test_entry: TestEntry, config: Config, status_manager: Sta
         try:
             # get the view to obtain csrftoken
             view_url = os.path.join(base_url, "api", "v1", "depositions", test_entry.copy_dep_id, "view")
+            auth_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             async with session.get(
                 url=view_url,
                 cookies={"depositor-orcid": orcid_cookie},
+                headers=auth_headers,
                 ssl=False
             ) as response:
                 if response.status != 200:
@@ -709,15 +711,17 @@ def generate_table(status_manager):
     return table
 
 
-async def run_entry_tasks(entry, config, status_manager):
+async def run_entry_tasks(entry, config, status_manager, api_key=None):
     """Run all tasks for a single entry sequentially using async API."""
     try:
         # Get entry info (sync operation)
         get_entry_info(entry, config, status_manager)
         
-        # Create async API instance
+        # Create async API instance with shared or new token
+        if api_key is None:
+            api_key = create_token(config.api.get("orcid"), expiration_days=7)
         api = DepositApi(
-            api_key=create_token(config.api.get("orcid"), expiration_days=7), 
+            api_key=api_key, 
             hostname=config.api.get("base_url"), 
             ssl_verify=False
         )
@@ -739,7 +743,7 @@ async def run_entry_tasks(entry, config, status_manager):
                 elif task.type == TaskType.COMPARE_REPOS:
                     compare_repos_task(entry, task, config, status_manager)
                 elif task.type == TaskType.SUBMIT:
-                    await submit_task(entry, config, status_manager)
+                    await submit_task(entry, config, status_manager, api_key=api_key)
                 else:
                     file_logger.warning("Unknown task type %s for entry %s", task.type, entry.dep_id)
             except Exception as e:
@@ -778,10 +782,12 @@ def setup_report_generation(config, output_dir: str = "reports"):
 async def run_all_entries(test_set, config, status_manager, max_concurrent=3):
     """Run all test entries with controlled concurrency"""
     semaphore = asyncio.Semaphore(max_concurrent)
+    # Create a single shared token to avoid token invalidation across concurrent entries
+    shared_api_key = create_token(config.api.get("orcid"), expiration_days=7)
     
     async def run_with_semaphore(entry):
         async with semaphore:
-            await run_entry_tasks(entry, config, status_manager)
+            await run_entry_tasks(entry, config, status_manager, api_key=shared_api_key)
     
     # Create tasks for all entries
     tasks = [run_with_semaphore(entry) for entry in test_set]
