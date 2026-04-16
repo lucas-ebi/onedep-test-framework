@@ -1,5 +1,13 @@
 import logging
 
+_log_file = "onedep_test.log"
+
+
+def set_log_file(path: str):
+    """Set the log file path for all file loggers."""
+    global _log_file
+    _log_file = path
+
 
 def get_file_logger(name: str) -> logging.Logger:
     """
@@ -9,7 +17,7 @@ def get_file_logger(name: str) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     
     # File handler
-    file_handler = logging.FileHandler("onedep_test.log")
+    file_handler = logging.FileHandler(_log_file)
     file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
     

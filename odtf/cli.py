@@ -25,7 +25,7 @@ from rich.live import Live
 from rich.spinner import Spinner
 from rich.table import Table
 
-from odtf.common import get_file_logger
+from odtf.common import get_file_logger, set_log_file
 from odtf.models import EntryStatus, FileTypeMapping, TestEntry, TaskType, Task, UploadTask, CompareFilesTask, TaskStatus
 from odtf.wwpdb_uri import WwPDBResourceURI, FilesystemBackend
 from odtf.archive import RemoteFetcher, LocalArchive
@@ -826,8 +826,10 @@ async def run_all_entries(test_set, config, status_manager, max_concurrent=3):
 @click.option('--generate-report', is_flag=True, help='Generate HTML test report', default=True)
 @click.option('--report-dir', default="reports", help='Directory for generated reports')
 @click.option('--max-concurrent', default=3, help='Maximum number of concurrent test entries')
-def main(test_config, generate_report, report_dir, max_concurrent):
+@click.option('--log-file', default="onedep_test.log", help='Path for the log file')
+def main(test_config, generate_report, report_dir, max_concurrent, log_file):
     """TEST_CONFIG is the path to the test configuration file."""
+    set_log_file(log_file)
     start_time = time.perf_counter()  # Start measuring time
     if getSiteId() in ["PDBE_PROD"]:  # get the production ids from config
         click.echo("This command is not allowed on production sites. Exiting.", err=True)
