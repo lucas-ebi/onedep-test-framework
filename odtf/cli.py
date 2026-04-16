@@ -302,7 +302,12 @@ async def _upload_all_files(api: DepositApi, test_entry: TestEntry, task: Upload
     arch_pickles = pi.getDirPath(dataSetId=test_entry.dep_id, fileSource="pickles")
     uploaded_files = []
     type_dict = {}
-    contour_level, pixel_spacing = parse_voxel_values(os.path.join(arch_pickles, "em_map_upload.pkl"))
+
+    # Only load voxel metadata if the source deposition has it
+    em_map_pkl = os.path.join(arch_pickles, "em_map_upload.pkl")
+    contour_level, pixel_spacing = (None, None)
+    if os.path.exists(em_map_pkl):
+        contour_level, pixel_spacing = parse_voxel_values(em_map_pkl)
 
     for f in task.files:
         content_type, file_format = f.split(".")
@@ -330,7 +335,7 @@ async def _upload_all_files(api: DepositApi, test_entry: TestEntry, task: Upload
             uploaded_files.append(file)
 
             if filetype in (FileType.EM_MAP, FileType.EM_ADDITIONAL_MAP, FileType.EM_MASK, FileType.EM_HALF_MAP):
-                if contour_level:
+                if contour_level and pixel_spacing:
                     status_manager.update_status(
                         test_entry, 
                         message=f"Updating metadata for {f} with contour level {contour_level} and pixel spacing {pixel_spacing}"
@@ -345,7 +350,10 @@ async def _upload_all_files(api: DepositApi, test_entry: TestEntry, task: Upload
                         description="Uploaded from test script"
                     )
                 else:
-                    raise Exception("Contour level or pixel spacing not found in pickle file. Can't continue automatically.")
+                    file_logger.warning(
+                        "No em_map_upload.pkl found for %s — source deposition has no EM map metadata. Skipping metadata update.",
+                        test_entry.dep_id
+                    )
                     
         except ValueError as e:
             status_manager.update_status(test_entry, status="failed", message=f"Error getting file type for {content_type}.{file_format}: {e}")
