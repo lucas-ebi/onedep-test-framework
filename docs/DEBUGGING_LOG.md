@@ -1,6 +1,6 @@
 # ODTF Debugging Log — RHEL 9 Migration Testing
 
-**Period:** 15–16 April 2026  
+**Period:** 15–17 April 2026  
 **Server:** codon-emdb-onedep-dev-03.ebi.ac.uk (RHEL 9)  
 **Fork:** `lucas-ebi/onedep-test-framework` (from `f764a01`)  
 **Plan:** 59 test depositions across EC, EM, NMR, XRAY, SSNMR, ND experiment types  
@@ -29,6 +29,12 @@
 18. [`process/` endpoint returns 500 — missing `django_q_ormq` table](#18-process-endpoint-returns-500--missing-django_q_ormq-table)
 19. [No qcluster worker running — tasks enqueued but never executed](#19-no-qcluster-worker-running--tasks-enqueued-but-never-executed)
 20. [Deposit app outdated — v0.63.1 → v0.65.1 upgrade](#20-deposit-app-outdated--v0631--v0651-upgrade)
+21. [Submit timeouts — WF engine stuck at INIT](#21-submit-timeouts--wf-engine-stuck-at-init)
+22. [Submit 500 — `submit_email.py` NoneType.zfill](#22-submit-500--submit_emailpy-nonetypezfill)
+23. [Invalid input file — D_1200xxx entries missing from production archive](#23-invalid-input-file--d_1200xxx-entries-missing-from-production-archive)
+24. [NoneType path — PathInfo can't resolve NMR format types](#24-nonetype-path--pathinfo-cant-resolve-nmr-format-types)
+25. [Processing timeouts — SLURM congestion under concurrent load](#25-processing-timeouts--slurm-congestion-under-concurrent-load)
+26. [Create 500 / cascading 403s — Apache worker exhaustion](#26-create-500--cascading-403s--apache-worker-exhaustion)
 
 ---
 
@@ -562,6 +568,153 @@ $APACHE_PREFIX_DIR/bin/httpd -k graceful -f $TOP_WWPDB_SITE_CONFIG_DIR/apache_co
 
 ---
 
+## 21. Submit timeouts — WF engine stuck at INIT
+
+**Symptom:** ~20 entries timed out after 30 minutes waiting for the submit workflow to complete. ODTF polls the processing status and eventually gives up.
+
+**Investigation:** Queried the `communication` table in the WF engine `status` database for representative timed-out depositions (D_800808–D_800813):
+
+```
+D_800808: status=INIT, wf=Annotation.bf.xml
+D_800809: status=INIT, wf=Annotation.bf.xml
+D_800810: status=INIT, wf=Annotation.bf.xml
+D_800811: status=INIT, wf=Annotation.bf.xml
+D_800812: status=INIT, wf=Annotation.bf.xml
+D_800813: status=INIT, wf=Annotation.bf.xml
+```
+
+All are stuck at `status=INIT` — the submit POST succeeded (HTTP 200, `{"progress": 100}`), but the WF engine never advanced them past INIT. The annotation workflow was never picked up.
+
+**Root cause:** WF engine infrastructure issue on the RHEL9 dev server. The WF engine is either not running, not monitoring new entries, or overloaded from 59+12 concurrent submissions. Not an ODTF bug.
+
+**Fix:** No ODTF change. Requires investigation of the WF engine service on dev03 — check if `WFTaskManager` is running and processing the queue.
+
+**Type:** Infrastructure issue. No code change.
+
+---
+
+## 22. Submit 500 — `submit_email.py` NoneType.zfill
+
+**Symptom:** ~8 entries got HTTP 500 on submit. The Apache error log showed:
+
+```
+File ".../submit_email.py", line 12, in get_assigned_codes_from_assigned_ids
+    assigned_codes.append('PDB ID ' + str(code_val) + ', Extended PDB ID ' + f'pdb_{code_val.zfill(8)}')
+AttributeError: 'NoneType' object has no attribute 'zfill'
+```
+
+**Root cause:** `submit_email.py` line 12 calls `code_val.zfill(8)` where `code_val` is `None`. The function `get_assigned_codes_from_assigned_ids` iterates over accession assignment rows in the database. When a row exists but the `code` column is `NULL`, it crashes. Entries that have no assignment rows at all skip the loop entirely and submit successfully.
+
+**Evidence:** 36 occurrences of `zfill` in the Apache error log (`error_log_codon-emdb-onedep-dev-03.ebi.ac.uk`), all on the same line.
+
+**Update (17 April):** Not a universal blocker. The manually curated plan run confirmed that submit succeeds for entries without accession assignment rows — submission emails were received. The crash only affects entries that have a partial/NULL assignment row (e.g. entries copied from depositions that had an accession slot allocated but no code filled in).
+
+**Fix:** This is a **deposit app bug** in `py-wwpdb_apps_deposit`. Needs a null guard:
+```python
+# In submit_email.py line 12, should be:
+if code_val:
+    assigned_codes.append('PDB ID ' + str(code_val) + ', Extended PDB ID ' + f'pdb_{code_val.zfill(8)}')
+```
+
+**Type:** Server-side bug (`py-wwpdb_apps_deposit`). No ODTF change.
+
+---
+
+## 23. Invalid input file — D_1200xxx entries missing from production archive
+
+**Symptom:** ~9 entries (all with `D_1200xxxxxx` IDs) failed upload with:
+```
+onedep_deposition.exceptions.DepositApiException: Invalid input file
+```
+
+**Investigation:** Checked tempdep directories on the RHEL9 dev server — all empty for these entries. Traced back to the production archive via `pdb-002.ebi.ac.uk`:
+
+```bash
+# D_1200002717 — 0 files in deposit/, deposit-ui/, and tempdep/
+# D_1200007623 — 0 files in deposit/, deposit-ui/, and tempdep/
+# D_1200007645, D_1200007497, D_1200000430, D_1200002723, D_1200004182 — all empty
+```
+
+**Root cause:** These old depositions have been cleaned up from the GPFS production archive. The rsync in ODTF's `RemoteFetcher` fetches nothing (empty source directory), then `filesystem.locate()` resolves a path to a non-existent file, and the upload API rejects it.
+
+**Fix:** No ODTF code change. These entries must be **excluded from the test plan**. The plan generator (`generate_odtf_plan.py`) should validate that source files exist before including an entry, or at minimum skip `D_1200xxxxxx`-era depositions known to be purged.
+
+**Type:** Data/infrastructure issue. No code change.
+
+---
+
+## 24. NoneType path — PathInfo can't resolve NMR format types
+
+**Symptom:** 4 NMR/SSNMR entries (D_1292105215, D_1292107513, D_1200010515, D_1292100036) failed with `NoneType` errors during file path resolution. The YAML plan specified format types like `tbl`, `tab`, `geo`, `peaks` (e.g. `nmr-restraints.tbl`).
+
+**Investigation:**
+
+1. **Checked `FILE_FORMAT_EXTENSION_DICTIONARY`** — no entries for `tbl`, `tab`, `geo`, or `peaks`. These are not registered wwPDB format types.
+
+2. **Checked `CONTENT_TYPE_DICTIONARY`** — `nmr-restraints-upload` accepts formats: `any`, `nmr-star`, `amber`, `cns`, `cyana`, `xplor-nih`, etc. — but NOT `tbl`, `tab`, or `txt`.
+
+3. **Checked actual files on disk:**
+   ```
+   D_1292105215_mr-upload_P1.dat.V1  ← format 'any', extension 'dat'
+   D_1292105215_mr-upload_P2.dat.V1
+   D_1292107513_mr_P1.dat.V1
+   D_1292100036_mr_P1.cns.V1         ← format 'cns'
+   ```
+   NMR restraint files are stored with format `any` (extension `.dat`) or their actual format (e.g. `.cns`). The literal database type names (`tbl`, `tab`, `geo`, `peaks`) are never used as file extensions.
+
+4. **Traced the failure path:** `wwpdb_uri.py` → `FilesystemBackend._resolve_path()` → `PathInfo.getFilePath(contentType, formatType)` — when `formatType='tbl'`, PathInfo returns `None` because `tbl` isn't in `FILE_FORMAT_EXTENSION_DICTIONARY`.
+
+5. **ODTF's `FileTypeMapping.ANY_FORMAT`** does have a fallback for `nmr-restraints` → maps to `NMR_RESTRAINT_OTHER` — but this only works if the plan entry actually reaches the mapping logic. The failure happens earlier, in the archive path resolution.
+
+**Root cause:** The plan generator (`generate_odtf_plan.py`) maps database content types like `nm-res-oth` (NMR restraints, other format) to ODTF entries with the literal database format name (e.g. `nmr-restraints.tbl`). But `tbl` is not a valid wwPDB format — the files are stored as format `any` with extension `.dat`.
+
+**Fix:** Update `generate_odtf_plan.py`'s `NEEDS_FORMAT` mapping to resolve `nm-res-oth`, `nm-pea-any`, and similar types to format `any` instead of the literal database format string. For example:
+```python
+# Instead of:
+"nm-res-oth": "nmr-restraints"  # then appends .tbl/.tab from DB
+
+# Use:
+"nm-res-oth": "nmr-restraints.any"  # always use format 'any'
+```
+
+**Type:** External fix (generator script). No ODTF code change.
+
+---
+
+## 25. Processing timeouts — SLURM congestion under concurrent load
+
+**Symptom:** 3 entries (D_1292122575, D_1292105613, D_1000204238) timed out at the 120-minute processing monitor limit.
+
+**Root cause:** With 59+12 entries submitted near-simultaneously (even throttled to `--max-concurrent 5`), the SLURM cluster queue was congested. These entries likely had large structures or complex validation steps that exceeded the timeout under heavy load. Not a code bug.
+
+**Fix:** No ODTF change. These should succeed when re-run individually or with lower concurrency on a less loaded cluster.
+
+**Type:** Infrastructure/load issue. No code change.
+
+---
+
+## 26. Create 500 / cascading 403s — Apache worker exhaustion
+
+**Symptom:** ~8 entries got HTTP 500 (`<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">`) during `create_deposition`. All subsequent tasks for these entries then failed with 403.
+
+**Investigation:** The 500 response was an Apache-level error page (not Django/WSGI), indicating the error occurred before reaching the application layer. The cascading 403s happen because:
+
+1. CREATE fails → no `copy_dep_id` is set on the entry
+2. UPLOAD uses the original `dep_id` (a production deposition ID)
+3. The Bearer token has no depositor link to the production deposition → 403 `authentication_failed`
+4. SUBMIT fails the same way
+
+**Root cause:** Apache `mod_wsgi` process/thread exhaustion. When many concurrent requests hit the server, the prefork workers are all busy and new connections get either queued or rejected with a generic 500. The RHEL9 dev Apache config likely has conservative worker limits.
+
+**Fix:** No ODTF change. Mitigations:
+- Use `--max-concurrent 3` or lower to reduce server load
+- Increase Apache `MaxRequestWorkers` / `ServerLimit` in the dev server config
+- Add retry logic in ODTF for transient 500s on create (future enhancement)
+
+**Type:** Infrastructure issue. No code change.
+
+---
+
 ## Summary of Commits
 
 | Commit | Description |
@@ -574,8 +727,11 @@ $APACHE_PREFIX_DIR/bin/httpd -k graceful -f $TOP_WWPDB_SITE_CONFIG_DIR/apache_co
 | `7272c16` | Wrap Django ORM calls with `sync_to_async` |
 | `0433c24` | Increase timeouts: REST adapter 1800s, monitor 120min, submit sock_read 30min |
 | `81a3758` | Only read `em_map_upload.pkl` if it exists in source archive |
+| `b31a391` | Add `--log-file` CLI option to avoid log file conflicts between runs |
 
-## Run Results (Run 2, after timeout + EM metadata fixes)
+## Run Results
+
+### Run 2 (after timeout + EM metadata fixes)
 
 | Outcome | Count |
 |---------|-------|
@@ -590,9 +746,26 @@ $APACHE_PREFIX_DIR/bin/httpd -k graceful -f $TOP_WWPDB_SITE_CONFIG_DIR/apache_co
 
 *Note: Run 2 used the old code (pre-timeout/metadata fixes). Run 3 was started with all fixes deployed.*
 
+### Combined Run (59 full + 12 retry, all fixes deployed)
+
+Ran on 16–17 April via tmux on dev03. Both runs wrote to the same log file (`onedep_test.log`) due to hardcoded filename (fixed in `b31a391`).
+
+| Category | Count | Root Cause | Issue |
+|----------|-------|------------|-------|
+| Submit timeouts (30 min) | ~20 | WF engine stuck at INIT — never picked up entries | [#21](#21-submit-timeouts--wf-engine-stuck-at-init) |
+| Submit 500s | ~8 | `submit_email.py` NoneType.zfill — deposit app bug | [#22](#22-submit-500--submit_emailpy-nonetypezfill) |
+| Invalid input file | ~9 | D_1200xxx entries purged from production archive | [#23](#23-invalid-input-file--d_1200xxx-entries-missing-from-production-archive) |
+| NoneType path (NMR formats) | 4 | PathInfo can't resolve `tbl`/`tab`/`geo`/`peaks` formats | [#24](#24-nonetype-path--pathinfo-cant-resolve-nmr-format-types) |
+| Processing timeouts (120 min) | 3 | SLURM congestion from concurrent load | [#25](#25-processing-timeouts--slurm-congestion-under-concurrent-load) |
+| Create 500 / cascading 403s | ~8 | Apache worker exhaustion under load | [#26](#26-create-500--cascading-403s--apache-worker-exhaustion) |
+
 ## Outstanding Issues (Not ODTF Bugs)
 
 1. **Server-side `updateDepositorTable` bug** — the workaround in ODTF should be removed once `py-wwpdb_apps_deposit` is fixed server-side.
-2. **Missing source data** — some entries have empty tempdep directories on RHEL9 dev; needs re-sync from production.
+2. **Missing source data** — D_1200xxxxxx-era entries have been purged from the GPFS production archive. Exclude from test plans.
 3. **Unlock 500** — server-side endpoint needs investigation (`KeyError: 'message'` in `testviews.py` line 268 when `depositDataSync.sync_single` fails because the source deposit path doesn't exist).
 4. **qcluster user lingering** — `Linger=no` on w3_pdb05 means the djangoq systemd user service dies when all SSH sessions end. Needs `sudo loginctl enable-linger w3_pdb05` for persistence.
+5. **`submit_email.py` NoneType.zfill** — deposit app bug: `code_val.zfill(8)` crashes when an accession assignment row exists with a NULL code value. Not a universal blocker — entries without assignment rows submit successfully. Still needs null guard in `py-wwpdb_apps_deposit`.
+6. **WF engine not processing submissions** — all submitted entries stuck at `status=INIT`. WF engine service on dev03 needs investigation.
+7. **NMR format mapping in plan generator** — `generate_odtf_plan.py`'s `NEEDS_FORMAT` mapping emits invalid format types (`tbl`, `tab`, `geo`, `peaks`). Should use format `any` for `nm-res-oth` and `nm-pea-any` types.
+8. **Apache worker limits** — RHEL9 dev Apache config has conservative prefork limits. Increase `MaxRequestWorkers` for concurrent testing, or keep `--max-concurrent` low.
